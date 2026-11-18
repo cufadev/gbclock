@@ -1,0 +1,12 @@
+*.gb
+*.o
+*.lst
+*.map
+*.sym
+*.noi
+*.ihx
+*.rel
+*.asm
+*.adb
+__pycache__/
+*.sav
