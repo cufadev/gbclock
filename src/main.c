@@ -56,14 +56,23 @@ static uint8_t frame = 0;
 // ---- Render de tarjetas ----
 
 // Copia una fila de 64 (8 bytes: 4 tiles x 2 bytes) al buffer en formato tile-major.
-static void put_row(uint8_t r, const uint8_t *src) {
+// shade 0 = normal; 1 = digito blanco pasa a gris claro; 2 = gris oscuro (se funde con la tarjeta).
+static void put_row_s(uint8_t r, const uint8_t *src, uint8_t shade) {
     uint8_t *d = buf + ((uint16_t)(r >> 3) * 64) + ((r & 7) << 1);
-    uint8_t tx;
+    uint8_t tx, lo, hi, w;
     for (tx = 0; tx < 4; tx++) {
-        d[tx * 16]     = src[tx * 2];
-        d[tx * 16 + 1] = src[tx * 2 + 1];
+        lo = src[tx * 2];
+        hi = src[tx * 2 + 1];
+        if (shade) {
+            w = ~(lo | hi);               // pixeles blancos (color 0)
+            if (shade == 1) lo |= w; else hi |= w;
+        }
+        d[tx * 16]     = lo;
+        d[tx * 16 + 1] = hi;
     }
 }
+
+#define put_row(r, src) put_row_s((r), (src), 0)
 
 static const uint8_t *card_row(uint8_t digit, uint8_t r) {
     return digit_cards[digit] + ((uint16_t)r << 3);
@@ -79,27 +88,31 @@ static void render_static(uint8_t slot, uint8_t digit) {
     upload(slot);
 }
 
-// Un cuadro de la animacion de giro. step = 1..6
-static void render_flip(uint8_t slot, uint8_t from, uint8_t to, uint8_t step) {
-    uint8_t r, h, i;
+#define FLIP_STEPS 10
 
-    // mitad de arriba (filas 0..31)
-    if (step <= 3) {
-        h = 32 - step * 8;                 // 24, 16, 8: el digito viejo se aplasta
+// Alto de la mitad que se mueve en cada paso. Plegar acelera (cae), desplegar frena.
+static const uint8_t fold_h[5]   = {30, 26, 20, 11, 0};
+static const uint8_t unfold_h[5] = {11, 20, 26, 30, 32};
+
+// Un cuadro de la animacion de giro. step = 1..FLIP_STEPS
+// 1..5: la mitad de arriba del digito viejo se pliega (se oscurece al caer).
+// 6..10: la mitad de abajo del digito nuevo se despliega (se ilumina al abrir).
+static void render_flip(uint8_t slot, uint8_t from, uint8_t to, uint8_t step) {
+    uint8_t r, h, i, shade;
+
+    if (step <= 5) {
+        h = fold_h[step - 1];
+        shade = (step >= 3) ? 1 : 0;
         for (r = 0; r < 32 - h; r++) put_row(r, card_row(to, r));
         for (i = 0; i < h; i++)
-            put_row(32 - h + i, card_row(from, (uint8_t)((uint16_t)i * 32 / h)));
-    } else {
-        for (r = 0; r < 32; r++) put_row(r, card_row(to, r));
-    }
-
-    // mitad de abajo (filas 32..63)
-    if (step <= 3) {
+            put_row_s(32 - h + i, card_row(from, (uint8_t)((uint16_t)i * 32 / h)), shade);
         for (r = 32; r < 64; r++) put_row(r, card_row(from, r));
     } else {
-        h = (step - 3) * 8;                // 8, 16, 24: el digito nuevo se despliega
+        h = unfold_h[step - 6];
+        shade = (step <= 7) ? 1 : 0;
+        for (r = 0; r < 32; r++) put_row(r, card_row(to, r));
         for (i = 0; i < h; i++)
-            put_row(32 + i, card_row(to, 32 + (uint8_t)((uint16_t)i * 32 / h)));
+            put_row_s(32 + i, card_row(to, 32 + (uint8_t)((uint16_t)i * 32 / h)), shade);
         for (r = 32 + h; r < 64; r++) put_row(r, card_row(from, r));
     }
     upload(slot);
@@ -242,10 +255,12 @@ void main(void) {
                     anim_new[i] = target[i];
                     anim_step[i] = 1;
                 }
-                if (anim_step[i] && (frame & 1) == 0) {
+                // un paso cada 2 frames; los slots pares e impares alternan para no
+                // copiar mas de dos tarjetas a VRAM en el mismo frame
+                if (anim_step[i] && (frame & 1) == (i & 1)) {
                     render_flip(i, anim_old[i], anim_new[i], anim_step[i]);
                     anim_step[i]++;
-                    if (anim_step[i] > 6) {
+                    if (anim_step[i] > FLIP_STEPS) {
                         render_static(i, anim_new[i]);
                         shown[i] = anim_new[i];
                         anim_step[i] = 0;
